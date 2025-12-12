@@ -1,0 +1,10 @@
+#!/bin/bash
+#SBATCH -J MPI_HELLO
+#SBATCH --ntasks=6
+#SBATCH --export=all
+#SBATCH --out=Mill-%a.out
+#SBATCH --time=0-00:10:00
+#SBATCH --mail-type=begin,end,fail,requeue
+ 
+module load openmpi/4.1.5/gcc/12.2.0
+mpirun ./a.out
