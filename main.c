@@ -4,6 +4,7 @@
 #include <float.h>
 #include <math.h>
 #include <mpi.h>
+#include <time.h>
 
 typedef struct {
     int *path;       // contains the order of cities in this path ie path[0] = first city, path[1] = second city, ...
@@ -358,9 +359,19 @@ void remove_index_inplace(int *arr, int *len, int idx) {
 int main(int argc, char *argv[]) {
     int rank, size;
     int force_seq = 0;
+    int use_random = 0;
+    int preset = 0; /* 0=small(default), 1=medium, 2=large */
+    int custom_n = 0;
+    unsigned int rand_seed = (unsigned int)time(NULL);
 
+    /* parse simple command-line flags before MPI_Init */
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--seq") == 0) force_seq = 1;
+        else if (strncmp(argv[i], "--n=", 4) == 0) custom_n = atoi(argv[i] + 4);
+        else if (strcmp(argv[i], "--random") == 0) use_random = 1;
+        else if (strncmp(argv[i], "--seed=", 7) == 0) rand_seed = (unsigned int)atoi(argv[i] + 7);
+        else if (strcmp(argv[i], "--preset=medium") == 0) preset = 1;
+        else if (strcmp(argv[i], "--preset=large") == 0) preset = 2;
     }
 
     MPI_Init(&argc, &argv);                 /* Initialize the MPI environment */
@@ -369,13 +380,78 @@ int main(int argc, char *argv[]) {
 
     if (rank == 0) printf("Comparing sequential and parallel TSP on %d MPI ranks\n", size);
 
-    /* city coordinates small set for algorithm testing */
+    /* default small dataset */
     int small_n = 5;
-    int small_xs[5] = {0,1,2,3,5};
-    int small_ys[5] = {0,1,2,3,8};
+    int small_xs_stack[5] = {0,1,2,3,5};
+    int small_ys_stack[5] = {0,1,2,3,8};
+
+    /* medium and large presets (increase as desired; beware factorial growth) */
+    int medium_n = 8;
+    int medium_xs_stack[8] = {0,2,5,9,4,7,3,8};
+    int medium_ys_stack[8] = {0,1,6,2,9,5,8,3};
+
+    int large_n = 10;
+    int large_xs_stack[10] = {0,10,20,30,15,25,5,35,12,22};
+    int large_ys_stack[10] = {0,5,15,8,20,2,25,10,18,12};
+
+    /* decide dataset */
+    int n = small_n;
+    int *xs = NULL;
+    int *ys = NULL;
+    int allocated_coords = 0;
+
+    if (custom_n > 0) {
+        n = custom_n;
+        use_random = 1; /* custom n implies generating coords unless user provides other mechanism */
+    } else if (preset == 1) {
+        n = medium_n;
+    } else if (preset == 2) {
+        n = large_n;
+    }
+
+    if (!use_random) {
+        /* point to stack preset arrays */
+        if (preset == 1) {
+            xs = medium_xs_stack;
+            ys = medium_ys_stack;
+        } else if (preset == 2) {
+            xs = large_xs_stack;
+            ys = large_ys_stack;
+        } else {
+            xs = small_xs_stack;
+            ys = small_ys_stack;
+        }
+    } else {
+        /* allocate and populate random integer coordinates in [0,100] */
+        xs = malloc(sizeof(int) * n);
+        ys = malloc(sizeof(int) * n);
+        if (!xs || !ys) {
+            if (xs) free(xs);
+            if (ys) free(ys);
+            if (rank == 0) fprintf(stderr, "Failed to allocate coordinate arrays for n=%d\n", n);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        allocated_coords = 1;
+        if (rank == 0) printf("Generating %d random cities (seed=%u)\n", n, rand_seed);
+        /* use same seed across ranks so datasets match */
+        srand(rand_seed);
+        for (int i = 0; i < n; ++i) {
+            xs[i] = rand() % 101;
+            ys[i] = rand() % 101;
+        }
+    }
+
+    if (rank == 0) {
+        printf("Using dataset with n=%d cities\n", n);
+        if (n <= 12) {
+            printf("Warning: brute-force TSP scales as n! — try n <= 10 for feasible runs\n");
+        } else {
+            printf("Caution: very large runtime expected for n > 12\n");
+        }
+    }
 
     travelingSalesman ts;
-    travelingSalesman_init(&ts, small_xs, small_ys, small_n);
+    travelingSalesman_init(&ts, xs, ys, n);
 
     double seq_elapsed = -1.0;
     coordinateSet seqBest;
@@ -402,7 +478,7 @@ int main(int argc, char *argv[]) {
         }
         /* free costMatrix and any internal allocations so parallel run can rebuild/broadcast */
         travelingSalesman_free(&ts);
-        travelingSalesman_init(&ts, small_xs, small_ys, small_n);
+        travelingSalesman_init(&ts, xs, ys, n);
     } else if (rank == 0 && size > 1 && !force_seq) {
         printf("Skipping sequential baseline in multi-rank run. To force it, run with --seq (may OOM).\n");
     }
@@ -445,6 +521,11 @@ int main(int argc, char *argv[]) {
 
     /* cleanup and exit */
     travelingSalesman_free(&ts);
+    if (allocated_coords) {
+        free(xs);
+        free(ys);
+    }
+
     MPI_Barrier(MPI_COMM_WORLD);
     MPI_Finalize();
     return 0;
