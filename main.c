@@ -357,6 +357,11 @@ void remove_index_inplace(int *arr, int *len, int idx) {
 
 int main(int argc, char *argv[]) {
     int rank, size;
+    int force_seq = 0;
+
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--seq") == 0) force_seq = 1;
+    }
 
     MPI_Init(&argc, &argv);                 /* Initialize the MPI environment */
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);   /* Get the rank of the process */
@@ -377,8 +382,9 @@ int main(int argc, char *argv[]) {
     seqBest.path = NULL;
     seqBest.distance = DBL_MAX;
 
-    /* Run sequential brute-force only on rank 0 to get baseline timing */
-    if (rank == 0) {
+    /* Run sequential brute-force only on rank 0 to get baseline timing.
+       Skip this when running a multi-rank job unless --seq is provided to avoid OOM. */
+    if (rank == 0 && (size == 1 || force_seq)) {
         double s0 = MPI_Wtime();
         seqBest = travelingSalesman_SEQ_bruteForce(&ts);
         double s1 = MPI_Wtime();
@@ -397,6 +403,8 @@ int main(int argc, char *argv[]) {
         /* free costMatrix and any internal allocations so parallel run can rebuild/broadcast */
         travelingSalesman_free(&ts);
         travelingSalesman_init(&ts, small_xs, small_ys, small_n);
+    } else if (rank == 0 && size > 1 && !force_seq) {
+        printf("Skipping sequential baseline in multi-rank run. To force it, run with --seq (may OOM).\n");
     }
 
     /* synchronize all ranks before parallel run */
