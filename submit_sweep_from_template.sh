@@ -7,10 +7,12 @@ set -euo pipefail
 
 TEMPLATE=mpibatchfile.script
 CSV=tsp_sweep_results.csv
-SEED=12345
+# base seed; per-n seed = BASE_SEED + n
+BASE_SEED=12400
 RUNS=1
 CORES=(1 2 4 8)
-NS=(5 6 7 8 9)
+# include larger city counts up to 13 as requested
+NS=(5 6 7 8 9 10 11 12 13)
 DRY_RUN=0
 OVERWRITE=1
 
@@ -53,47 +55,62 @@ if [ ! -f "$TEMPLATE" ]; then
   exit 1
 fi
 
+done
 FIRST=1
 
-for cores in "${CORES[@]}"; do
-  for n in "${NS[@]}"; do
+# Submit a sequential baseline for each n, then its parallel runs (cores > 1)
+for n in "${NS[@]}"; do
+  SEED=$((BASE_SEED + n))
+
+  # submit sequential baseline (cores=1) first for this n
+  cores=1
+  TMP="./sbatch_tmp_${cores}t_${n}n.sh"
+  cp "$TEMPLATE" "$TMP"
+  if grep -q "^#SBATCH .*--ntasks" "$TMP"; then
+    sed -i "s/^#SBATCH .*--ntasks=.*/#SBATCH --ntasks=${cores}/" "$TMP"
+  else
+    sed -i "1a #SBATCH --ntasks=${cores}" "$TMP"
+  fi
+
+  OVERWRITE_FLAG=""
+  if [ $FIRST -eq 1 ] && [ $OVERWRITE -eq 1 ]; then
+    OVERWRITE_FLAG="--overwrite"
+    FIRST=0
+  fi
+
+  CMD_SEQ="mpirun ./main --n=${n} --runs=${RUNS} --csv=${CSV} ${OVERWRITE_FLAG} --seed=${SEED} --random --seq"
+  sed -i "/^\\s*\(mpirun\|srun\) /c\\${CMD_SEQ}" "$TMP"
+  echo "Prepared sequential $TMP -> cores=1 n=$n cmd: $CMD_SEQ"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "DRY RUN: sbatch $TMP"
+  else
+    sbatch "$TMP"
+  fi
+  sleep 5
+
+  # now submit parallel runs for this n
+  for cores in "${CORES[@]}"; do
+    if [ "$cores" -le 1 ]; then
+      continue
+    fi
     TMP="./sbatch_tmp_${cores}t_${n}n.sh"
     cp "$TEMPLATE" "$TMP"
-
-    # Ensure there is a SBATCH ntasks line; if present replace it, otherwise insert after first line
     if grep -q "^#SBATCH .*--ntasks" "$TMP"; then
       sed -i "s/^#SBATCH .*--ntasks=.*/#SBATCH --ntasks=${cores}/" "$TMP"
     else
-      # insert after the first line
       sed -i "1a #SBATCH --ntasks=${cores}" "$TMP"
     fi
 
-    # Replace any existing mpirun line with desired command
-    # If cores==1 include --seq to get sequential timing
-    OVERWRITE_FLAG=""
-    if [ $FIRST -eq 1 ] && [ $OVERWRITE -eq 1 ]; then
-      OVERWRITE_FLAG="--overwrite"
-      FIRST=0
-    fi
+    CMD_PAR="mpirun ./main --n=${n} --runs=${RUNS} --csv=${CSV} ${OVERWRITE_FLAG} --seed=${SEED} --random"
+    sed -i "/^\\s*\(mpirun\|srun\) /c\\${CMD_PAR}" "$TMP"
 
-    if [ "$cores" -eq 1 ]; then
-      CMD="mpirun ./main --n=${n} --runs=${RUNS} --csv=${CSV} ${OVERWRITE_FLAG} --seed=${SEED} --random --seq"
-    else
-      CMD="mpirun ./main --n=${n} --runs=${RUNS} --csv=${CSV} ${OVERWRITE_FLAG} --seed=${SEED} --random"
-    fi
-
-    # replace any line starting with mpirun or srun
-    sed -i "/^\\s*\(mpirun\|srun\) /c\\${CMD}" "$TMP"
-
-    echo "Prepared $TMP -> cores=$cores n=$n cmd: $CMD"
+    echo "Prepared $TMP -> cores=$cores n=$n cmd: $CMD_PAR"
     if [ "$DRY_RUN" -eq 1 ]; then
       echo "DRY RUN: sbatch $TMP"
     else
       sbatch "$TMP"
     fi
-
-    # small sleep to avoid submitting too quickly
-    sleep 0.2
+    sleep 5
   done
 done
 
