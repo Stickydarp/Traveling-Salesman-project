@@ -54,8 +54,6 @@ if [ ! -f "$TEMPLATE" ]; then
   echo "Template $TEMPLATE not found in current directory." >&2
   exit 1
 fi
-
-done
 FIRST=1
 
 # Submit a sequential baseline for each n, then its parallel runs (cores > 1)
