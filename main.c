@@ -364,6 +364,12 @@ int main(int argc, char *argv[]) {
     int custom_n = 0;
     unsigned int rand_seed = (unsigned int)time(NULL);
 
+    /* new batch/CSV options */
+    char csv_filename[512] = "tsp_results.csv";
+    int runs_per_n = 1;
+    int min_n = 0, max_n = 0, step_n = 1;
+    int overwrite_csv = 0;
+
     /* parse simple command-line flags before MPI_Init */
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--seq") == 0) force_seq = 1;
@@ -372,6 +378,12 @@ int main(int argc, char *argv[]) {
         else if (strncmp(argv[i], "--seed=", 7) == 0) rand_seed = (unsigned int)atoi(argv[i] + 7);
         else if (strcmp(argv[i], "--preset=medium") == 0) preset = 1;
         else if (strcmp(argv[i], "--preset=large") == 0) preset = 2;
+        else if (strncmp(argv[i], "--csv=", 6) == 0) strncpy(csv_filename, argv[i] + 6, sizeof(csv_filename) - 1);
+        else if (strncmp(argv[i], "--runs=", 7) == 0) runs_per_n = atoi(argv[i] + 7);
+        else if (strncmp(argv[i], "--min-n=", 8) == 0) min_n = atoi(argv[i] + 8);
+        else if (strncmp(argv[i], "--max-n=", 8) == 0) max_n = atoi(argv[i] + 8);
+        else if (strncmp(argv[i], "--step=", 7) == 0) step_n = atoi(argv[i] + 7);
+        else if (strcmp(argv[i], "--overwrite") == 0) overwrite_csv = 1;
     }
 
     MPI_Init(&argc, &argv);                 /* Initialize the MPI environment */
@@ -394,137 +406,175 @@ int main(int argc, char *argv[]) {
     int large_xs_stack[10] = {0,10,20,30,15,25,5,35,12,22};
     int large_ys_stack[10] = {0,5,15,8,20,2,25,10,18,12};
 
-    /* decide dataset */
-    int n = small_n;
-    int *xs = NULL;
-    int *ys = NULL;
-    int allocated_coords = 0;
+    /* decide iteration range */
+    if (min_n > 0 && max_n > 0 && max_n < min_n) {
+        if (rank == 0) fprintf(stderr, "Invalid min/max n range\n");
+        MPI_Finalize();
+        return 1;
+    }
 
     if (custom_n > 0) {
-        n = custom_n;
-        use_random = 1; /* custom n implies generating coords unless user provides other mechanism */
-    } else if (preset == 1) {
-        n = medium_n;
-    } else if (preset == 2) {
-        n = large_n;
+        if (min_n == 0 && max_n == 0) {
+            min_n = max_n = custom_n;
+        }
+        use_random = 1; /* custom n implies generating coords unless user supplies presets */
     }
 
-    if (!use_random) {
-        /* point to stack preset arrays */
-        if (preset == 1) {
-            xs = medium_xs_stack;
-            ys = medium_ys_stack;
-        } else if (preset == 2) {
-            xs = large_xs_stack;
-            ys = large_ys_stack;
+    if (min_n == 0 && max_n == 0) {
+        /* No range provided, use preset or single n from preset */
+        if (preset == 1) { min_n = max_n = medium_n; }
+        else if (preset == 2) { min_n = max_n = large_n; }
+        else if (custom_n > 0) { min_n = max_n = custom_n; }
+        else { min_n = max_n = small_n; }
+    }
+
+    if (step_n <= 0) step_n = 1;
+
+    /* CSV file handling on rank 0 */
+    FILE *csvf = NULL;
+    if (rank == 0) {
+        if (overwrite_csv) {
+            csvf = fopen(csv_filename, "w");
         } else {
-            xs = small_xs_stack;
-            ys = small_ys_stack;
+            /* append if exists, otherwise create and write header */
+            FILE *tf = fopen(csv_filename, "r");
+            if (tf) { fclose(tf); csvf = fopen(csv_filename, "a"); }
+            else csvf = fopen(csv_filename, "w");
         }
-    } else {
-        /* allocate and populate random integer coordinates in [0,100] */
-        xs = malloc(sizeof(int) * n);
-        ys = malloc(sizeof(int) * n);
-        if (!xs || !ys) {
-            if (xs) free(xs);
-            if (ys) free(ys);
-            if (rank == 0) fprintf(stderr, "Failed to allocate coordinate arrays for n=%d\n", n);
+        if (!csvf) {
+            fprintf(stderr, "Failed to open CSV file '%s' for writing\n", csv_filename);
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
-        allocated_coords = 1;
-        if (rank == 0) printf("Generating %d random cities (seed=%u)\n", n, rand_seed);
-        /* use same seed across ranks so datasets match */
-        srand(rand_seed);
-        for (int i = 0; i < n; ++i) {
-            xs[i] = rand() % 101;
-            ys[i] = rand() % 101;
+        /* if we opened in write mode, print header */
+        if (overwrite_csv || ftell(csvf) == 0) {
+            fprintf(csvf, "n,mpi_ranks,run,seed,seq_time_s,par_time_s,speedup,efficiency,best_distance\n");
+            fflush(csvf);
         }
     }
 
-    if (rank == 0) {
-        printf("Using dataset with n=%d cities\n", n);
-        if (n <= 12) {
-            printf("Warning: brute-force TSP scales as n! — try n <= 10 for feasible runs\n");
-        } else {
-            printf("Caution: very large runtime expected for n > 12\n");
-        }
-    }
-
-    travelingSalesman ts;
-    travelingSalesman_init(&ts, xs, ys, n);
-
-    double seq_elapsed = -1.0;
-    coordinateSet seqBest;
-    seqBest.path = NULL;
-    seqBest.distance = DBL_MAX;
-
-    /* Run sequential brute-force only on rank 0 to get baseline timing.
-       Skip this when running a multi-rank job unless --seq is provided to avoid OOM. */
-    if (rank == 0 && (size == 1 || force_seq)) {
-        double s0 = MPI_Wtime();
-        seqBest = travelingSalesman_SEQ_bruteForce(&ts);
-        double s1 = MPI_Wtime();
-        seq_elapsed = s1 - s0;
-        printf("Sequential: time = %.6f s, best distance = %.6f\n", seq_elapsed, seqBest.distance);
-        if (seqBest.path) {
-            printf("Sequential path: ");
-            for (int i = 0; i < ts.numCities; ++i) {
-                printf("%d", seqBest.path[i]);
-                if (i + 1 < ts.numCities) printf(" -> ");
+    /* iterate over requested n values and perform runs_per_n runs */
+    for (int n = min_n; n <= max_n; n += step_n) {
+        if (rank == 0) {
+            printf("Starting tests for n=%d (runs=%d)\n", n, runs_per_n);
+            if (n <= 12) {
+                printf("Note: brute-force TSP scales as n! — n=%d may be expensive\n", n);
             }
-            printf(" -> %d\n", seqBest.path[0]);
-            free(seqBest.path);
+        }
+
+        for (int run = 1; run <= runs_per_n; ++run) {
+            int *xs = NULL;
+            int *ys = NULL;
+            int allocated_coords = 0;
+            unsigned int seed = rand_seed + run + n * 13;
+
+            if (!use_random) {
+                /* use preset arrays when sizes match; otherwise fall back to random */
+                if (n == small_n) {
+                    xs = small_xs_stack; ys = small_ys_stack;
+                } else if (n == medium_n) {
+                    xs = medium_xs_stack; ys = medium_ys_stack;
+                } else if (n == large_n) {
+                    xs = large_xs_stack; ys = large_ys_stack;
+                } else {
+                    /* fall back to random when preset not available */
+                    allocated_coords = 1;
+                    xs = malloc(sizeof(int) * n);
+                    ys = malloc(sizeof(int) * n);
+                    if (!xs || !ys) {
+                        if (xs) free(xs); if (ys) free(ys);
+                        if (rank == 0) fprintf(stderr, "Failed to allocate coords for n=%d\n", n);
+                        MPI_Abort(MPI_COMM_WORLD, 1);
+                    }
+                }
+            } else {
+                allocated_coords = 1;
+                xs = malloc(sizeof(int) * n);
+                ys = malloc(sizeof(int) * n);
+                if (!xs || !ys) {
+                    if (xs) free(xs); if (ys) free(ys);
+                    if (rank == 0) fprintf(stderr, "Failed to allocate coords for n=%d\n", n);
+                    MPI_Abort(MPI_COMM_WORLD, 1);
+                }
+            }
+
+            /* populate random coordinates identically on all ranks when allocated */
+            if (allocated_coords) {
+                /* ensure same sequence across ranks */
+                srand(seed);
+                for (int i = 0; i < n; ++i) {
+                    xs[i] = rand() % 101;
+                    ys[i] = rand() % 101;
+                }
+                if (rank == 0) printf("Generated random coords for n=%d run=%d seed=%u\n", n, run, seed);
+            }
+
+            travelingSalesman ts;
+            travelingSalesman_init(&ts, xs, ys, n);
+
+            double seq_elapsed = -1.0;
+            coordinateSet seqBest;
             seqBest.path = NULL;
-        }
-        /* free costMatrix and any internal allocations so parallel run can rebuild/broadcast */
-        travelingSalesman_free(&ts);
-        travelingSalesman_init(&ts, xs, ys, n);
-    } else if (rank == 0 && size > 1 && !force_seq) {
-        printf("Skipping sequential baseline in multi-rank run. To force it, run with --seq (may OOM).\n");
-    }
+            seqBest.distance = DBL_MAX;
 
-    /* synchronize all ranks before parallel run */
-    MPI_Barrier(MPI_COMM_WORLD);
-
-    /* Run parallel brute-force on all ranks and time wall-clock (max across ranks) */
-    double p0 = MPI_Wtime();
-    coordinateSet parBest = travelingSalesman_PAR_bruteForce(&ts, rank, size);
-    double p1 = MPI_Wtime();
-    double local_par_time = p1 - p0;
-    double par_elapsed = 0.0;
-    MPI_Reduce(&local_par_time, &par_elapsed, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
-
-    if (rank == 0) {
-        if (parBest.path) {
-            printf("Parallel: time = %.6f s, best distance = %.6f\n", par_elapsed, parBest.distance);
-            printf("Parallel path: ");
-            for (int i = 0; i < ts.numCities; ++i) {
-                printf("%d", parBest.path[i]);
-                if (i + 1 < ts.numCities) printf(" -> ");
+            /* Run sequential brute-force only on rank 0 to get baseline timing when requested */
+            if (rank == 0 && (size == 1 || force_seq)) {
+                double s0 = MPI_Wtime();
+                seqBest = travelingSalesman_SEQ_bruteForce(&ts);
+                double s1 = MPI_Wtime();
+                seq_elapsed = s1 - s0;
+                printf("[n=%d run=%d] Sequential: time = %.6f s, best distance = %.6f\n", n, run, seq_elapsed, seqBest.distance);
+                if (seqBest.path) { free(seqBest.path); seqBest.path = NULL; }
+                /* free costMatrix and re-init to avoid stale data for parallel run */
+                travelingSalesman_free(&ts);
+                travelingSalesman_init(&ts, xs, ys, n);
+            } else if (rank == 0 && size > 1 && !force_seq) {
+                printf("[n=%d run=%d] Skipping sequential baseline (run with --seq to force)\n", n, run);
             }
-            printf(" -> %d\n", parBest.path[0]);
-            free(parBest.path);
-            parBest.path = NULL;
-        } else {
-            printf("Parallel: no path returned to root\n");
-        }
 
-        if (seq_elapsed > 0.0 && par_elapsed > 0.0) {
-            double S = seq_elapsed / par_elapsed;
-            double E = S / (double)size;
-            printf("Speedup S = T_seq / T_par = %.4f\n", S);
-            printf("Efficiency E = S / p = %.4f\n", E);
-        } else {
-            printf("Cannot compute speedup/efficiency (missing timings)\n");
-        }
-    }
+            MPI_Barrier(MPI_COMM_WORLD);
 
-    /* cleanup and exit */
-    travelingSalesman_free(&ts);
-    if (allocated_coords) {
-        free(xs);
-        free(ys);
-    }
+            /* Run parallel brute-force on all ranks and time wall-clock (max across ranks) */
+            double p0 = MPI_Wtime();
+            coordinateSet parBest = travelingSalesman_PAR_bruteForce(&ts, rank, size);
+            double p1 = MPI_Wtime();
+            double local_par_time = p1 - p0;
+            double par_elapsed = 0.0;
+            MPI_Reduce(&local_par_time, &par_elapsed, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+            if (rank == 0) {
+                double best_distance = (parBest.path) ? parBest.distance : DBL_MAX;
+                if (parBest.path) { printf("[n=%d run=%d] Parallel: time = %.6f s, best distance = %.6f\n", n, run, par_elapsed, parBest.distance); free(parBest.path); parBest.path = NULL; }
+                else { printf("[n=%d run=%d] Parallel: no path returned to root\n", n, run); }
+
+                double speedup = -1.0, efficiency = -1.0;
+                if (seq_elapsed > 0.0 && par_elapsed > 0.0) {
+                    speedup = seq_elapsed / par_elapsed;
+                    efficiency = speedup / (double)size;
+                }
+
+                /* write CSV line for this run (root only) */
+                if (csvf) {
+                    /* build row piece by piece so missing values are empty fields */
+                    fprintf(csvf, "%d,%d,%d,%u,", n, size, run, seed);
+                    if (seq_elapsed > 0.0) fprintf(csvf, "%.6f,", seq_elapsed);
+                    else fprintf(csvf, ",");
+                    fprintf(csvf, "%.6f,", par_elapsed);
+                    if (speedup > 0.0) fprintf(csvf, "%.6f,%.6f,", speedup, efficiency);
+                    else fprintf(csvf, ",,");
+                    fprintf(csvf, "%.6f\n", best_distance);
+                    fflush(csvf);
+                }
+            }
+
+            /* cleanup per-run */
+            travelingSalesman_free(&ts);
+            if (allocated_coords) { free(xs); free(ys); }
+
+            MPI_Barrier(MPI_COMM_WORLD);
+        } /* end runs */
+    } /* end n loop */
+
+    if (rank == 0 && csvf) fclose(csvf);
 
     MPI_Barrier(MPI_COMM_WORLD);
     MPI_Finalize();
