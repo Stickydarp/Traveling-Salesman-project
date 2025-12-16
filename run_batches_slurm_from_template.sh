@@ -17,7 +17,7 @@ PRESETS=("small" "medium" "large")
 # list of MPI ranks to test; set to the maximum you requested in --ntasks above
 CORES=(1 2 4 8)
 
-MPI_CMD="mpirun"
+MPI_CMD="srun"
 
 echo "Running TSP batch on Slurm node $(hostname)"
 
@@ -42,10 +42,12 @@ for preset in "${PRESETS[@]}"; do
 
     if [ "$cores" -eq 1 ]; then
       echo "Running sequential baseline for preset=$preset"
-      $MPI_CMD -np 1 ./$BIN --preset=$preset --runs=$RUNS --csv=$CSV $OVERWRITE_FLAG --seq
+      # srun will use one task within the allocation
+      $MPI_CMD -n 1 ./$BIN --preset=$preset --runs=$RUNS --csv=$CSV $OVERWRITE_FLAG --seq
     else
       echo "Running parallel preset=$preset with $cores ranks"
-      $MPI_CMD -np $cores ./$BIN --preset=$preset --runs=$RUNS --csv=$CSV $OVERWRITE_FLAG
+      # request the desired number of tasks from Slurm's allocation
+      $MPI_CMD -n $cores ./$BIN --preset=$preset --runs=$RUNS --csv=$CSV $OVERWRITE_FLAG
     fi
 
     echo "Completed preset=$preset cores=$cores"
