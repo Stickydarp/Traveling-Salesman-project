@@ -12,7 +12,7 @@ BASE_SEED=12400
 RUNS=1
 CORES=(1 2 4 8)
 # include larger city counts up to 13 as requested
-NS=(5 6 7 8 9 10 11 12 13)
+NS=(5 6 7 8 9 10 11)
 DRY_RUN=0
 OVERWRITE=1
 
