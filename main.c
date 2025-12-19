@@ -5,6 +5,7 @@
 #include <math.h>
 #include <mpi.h>
 #include <time.h>
+#include <unistd.h>
 
 typedef struct {
     int *path;       // contains the order of cities in this path ie path[0] = first city, path[1] = second city, ...
