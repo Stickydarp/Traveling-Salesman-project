@@ -12,10 +12,11 @@ mpicc main.c -lm -o main
 ``` 
 4. Make the submission script executable
    `chmod +x submit_sweep_from_template.sh`
+   `chmod +x merge_csvs.sh`
 
 5. Run the script to submit jobs
    `./submit_sweep_from_template.sh --dry-run`  (to see what would be submitted without actually submitting)
    `./submit_sweep_from_template.sh` (to actually submit the jobs)
 
 ## Results will be appended to results.csv in the project directory
-To merge per-job CSVs into one file: `./merge_csvs.sh combined.csv tsp_results.csv.job-*.csv`
+To merge per-job CSVs into one file: `./merge_csvs.sh name_of_output_file.csv`
