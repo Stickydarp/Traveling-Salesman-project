@@ -430,25 +430,46 @@ int main(int argc, char *argv[]) {
 
     if (step_n <= 0) step_n = 1;
 
-    /* CSV file handling on rank 0 */
+    /* CSV file handling on rank 0
+       To avoid multiple parallel jobs concurrently appendig to the file*/
     FILE *csvf = NULL;
+    char final_csv[1024];
     if (rank == 0) {
-        if (overwrite_csv) {
-            csvf = fopen(csv_filename, "w");
+        const char *per_job = getenv("CSV_PER_JOB");
+        const char *slurm_job = getenv("SLURM_JOB_ID");
+        if (per_job != NULL || slurm_job != NULL) {
+            /* build unique filename: base + .job-<jobid or host>-<pid>.csv */
+            const char *idpart = slurm_job ? slurm_job : "local";
+            char hostbuf[128] = {0};
+            gethostname(hostbuf, sizeof(hostbuf));
+            snprintf(final_csv, sizeof(final_csv), "%s.job-%s-%s-%d.csv", csv_filename, idpart, hostbuf, (int)getpid());
+            if (overwrite_csv) csvf = fopen(final_csv, "w");
+            else csvf = fopen(final_csv, "a");
         } else {
-            /* append if exists, otherwise create and write header */
-            FILE *tf = fopen(csv_filename, "r");
-            if (tf) { fclose(tf); csvf = fopen(csv_filename, "a"); }
-            else csvf = fopen(csv_filename, "w");
+            /* default behavior: append to provided CSV filename */
+            strncpy(final_csv, csv_filename, sizeof(final_csv)-1);
+            final_csv[sizeof(final_csv)-1] = '\0';
+            if (overwrite_csv) {
+                csvf = fopen(final_csv, "w");
+            } else {
+                FILE *tf = fopen(final_csv, "r");
+                if (tf) { fclose(tf); csvf = fopen(final_csv, "a"); }
+                else csvf = fopen(final_csv, "w");
+            }
         }
         if (!csvf) {
-            fprintf(stderr, "Failed to open CSV file '%s' for writing\n", csv_filename);
+            fprintf(stderr, "Failed to open CSV file '%s' for writing\n", final_csv);
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
-        /* if we opened in write mode, print header */
+        
         if (overwrite_csv || ftell(csvf) == 0) {
-            fprintf(csvf, "n,mpi_ranks,run,seed,seq_time_s,par_time_s,speedup,efficiency,best_distance\n");
+            fprintf(csvf, "n,mpi_ranks,run,seed,seq_time_s,par_time_s,best_distance\n");
             fflush(csvf);
+        }
+        if (per_job != NULL || slurm_job != NULL) {
+            printf("Writing per-job CSV output to '%s'\n", final_csv);
+        } else {
+            printf("Writing CSV output to '%s'\n", final_csv);
         }
     }
 
@@ -533,36 +554,44 @@ int main(int argc, char *argv[]) {
 
             MPI_Barrier(MPI_COMM_WORLD);
 
-            /* Run parallel brute-force on all ranks and time wall-clock (max across ranks) */
-            double p0 = MPI_Wtime();
-            coordinateSet parBest = travelingSalesman_PAR_bruteForce(&ts, rank, size);
-            double p1 = MPI_Wtime();
-            double local_par_time = p1 - p0;
-            double par_elapsed = 0.0;
-            MPI_Reduce(&local_par_time, &par_elapsed, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+            if (size > 1) {
+                /* Run parallel brute-force on all ranks and time wall-clock (max across ranks) */
+                double p0 = MPI_Wtime();
+                coordinateSet parBest = travelingSalesman_PAR_bruteForce(&ts, rank, size);
+                double p1 = MPI_Wtime();
+                double local_par_time = p1 - p0;
+                double par_elapsed = 0.0;
+                MPI_Reduce(&local_par_time, &par_elapsed, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
-            if (rank == 0) {
-                double best_distance = (parBest.path) ? parBest.distance : DBL_MAX;
-                if (parBest.path) { printf("[n=%d run=%d] Parallel: time = %.6f s, best distance = %.6f\n", n, run, par_elapsed, parBest.distance); free(parBest.path); parBest.path = NULL; }
-                else { printf("[n=%d run=%d] Parallel: no path returned to root\n", n, run); }
+                if (rank == 0) {
+                    double best_distance = (parBest.path) ? parBest.distance : DBL_MAX;
+                    if (parBest.path) { printf("[n=%d run=%d] Parallel: time = %.6f s, best distance = %.6f\n", n, run, par_elapsed, parBest.distance); free(parBest.path); parBest.path = NULL; }
+                    else { printf("[n=%d run=%d] Parallel: no path returned to root\n", n, run); }
 
-                double speedup = -1.0, efficiency = -1.0;
-                if (seq_elapsed > 0.0 && par_elapsed > 0.0) {
-                    speedup = seq_elapsed / par_elapsed;
-                    efficiency = speedup / (double)size;
+                    /* write CSV line for this run (root only) */
+                    if (csvf) {
+                        /* build row piece by piece so missing values are empty fields */
+                        fprintf(csvf, "%d,%d,%d,%u,", n, size, run, seed);
+                        if (seq_elapsed > 0.0) fprintf(csvf, "%.6f,", seq_elapsed);
+                        else fprintf(csvf, ",");
+                        fprintf(csvf, "%.6f,", par_elapsed);
+                        fprintf(csvf, "%.6f\n", best_distance);
+                        fflush(csvf);
+                    }
                 }
-
-                /* write CSV line for this run (root only) */
-                if (csvf) {
-                    /* build row piece by piece so missing values are empty fields */
-                    fprintf(csvf, "%d,%d,%d,%u,", n, size, run, seed);
-                    if (seq_elapsed > 0.0) fprintf(csvf, "%.6f,", seq_elapsed);
-                    else fprintf(csvf, ",");
-                    fprintf(csvf, "%.6f,", par_elapsed);
-                    if (speedup > 0.0) fprintf(csvf, "%.6f,%.6f,", speedup, efficiency);
-                    else fprintf(csvf, ",,");
-                    fprintf(csvf, "%.6f\n", best_distance);
-                    fflush(csvf);
+            } else {
+                /* size == 1: only sequential run was performed; do not run parallel.
+                   Write CSV with seq_time filled and leave par_time empty. */
+                if (rank == 0) {
+                    double best_distance = seqBest.distance;
+                    if (csvf) {
+                        fprintf(csvf, "%d,%d,%d,%u,", n, size, run, seed);
+                        if (seq_elapsed > 0.0) fprintf(csvf, "%.6f,", seq_elapsed);
+                        else fprintf(csvf, ",");
+                        /* leave par_time empty */
+                        fprintf(csvf, ",%.6f\n", best_distance);
+                        fflush(csvf);
+                    }
                 }
             }
 

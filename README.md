@@ -7,9 +7,9 @@ In order to compile and run follow these steps:
 2. import the module for openmpi
    `module load openmpi/4.1.5/gcc/12.2.0`
 3. Compile the code 
-'''bash
-    mpicc main.c -lm -o main
-''' 
+```bash
+mpicc main.c -lm -o main
+``` 
 4. Make the submission script executable
    `chmod +x submit_sweep_from_template.sh`
 
@@ -18,3 +18,4 @@ In order to compile and run follow these steps:
    `./submit_sweep_from_template.sh` (to actually submit the jobs)
 
 ## Results will be appended to results.csv in the project directory
+To merge per-job CSVs into one file: `./merge_csvs.sh combined.csv tsp_results.csv.job-*.csv`
