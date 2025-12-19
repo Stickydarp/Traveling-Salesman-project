@@ -84,7 +84,7 @@ for n in "${NS[@]}"; do
   else
     sbatch "$TMP"
   fi
-  sleep 5
+  sleep 0.10
 
   # now submit parallel runs for this n
   for cores in "${CORES[@]}"; do
@@ -108,7 +108,7 @@ for n in "${NS[@]}"; do
     else
       sbatch "$TMP"
     fi
-    sleep 5
+    sleep 0.5
   done
 done
 

@@ -10,7 +10,10 @@ In order to compile and run follow these steps:
 '''bash
     mpicc main.c -lm -o main
 ''' 
-4. Run the script to submit jobs
+4. Make the submission script executable
+   `chmod +x submit_sweep_from_template.sh`
+
+5. Run the script to submit jobs
    `./submit_sweep_from_template.sh --dry-run`  (to see what would be submitted without actually submitting)
    `./submit_sweep_from_template.sh` (to actually submit the jobs)
 
